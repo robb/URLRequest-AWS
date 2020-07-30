@@ -2,9 +2,9 @@ import CommonCrypto
 import Foundation
 
 public struct Credentials: Codable {
-    var accessKey: String
+    public let accessKey: String
 
-    var accessKeyID: String
+    public let accessKeyID: String
 
     fileprivate var prefixedKey: String {
         "AWS4" + accessKey
