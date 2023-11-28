@@ -1,4 +1,4 @@
-import CommonCrypto
+import CryptoKit
 import Foundation
 
 public struct Credentials: Codable {
@@ -30,8 +30,12 @@ public extension URLRequest {
         ]
 
         let derivedSigningKey = parameters
-            .map { $0.utf8Data }
-            .reduce(credentials.prefixedKey.utf8Data, hmacDigest)
+            .reduce(into: SymmetricKey(data: Data(credentials.prefixedKey.utf8))) { key, parameter in
+                var hmac = HMAC<SHA256>(key: key)
+                hmac.update(data: Data(parameter.utf8))
+
+                key = SymmetricKey(data: Data(hmac.finalize()))
+            }
 
         let credentialScope = parameters.joined(separator: "/")
 
@@ -55,30 +59,40 @@ public extension URLRequest {
             .joined(separator: ";")
             .lowercased()
 
-        let encodedPayloadHash = (httpBody ?? Data()).sha256Hash().hexEncodedString()
+        let encodedPayloadSignature = SHA256.hash(data: httpBody ?? Data()).hexEncodedString()
 
-        let canonicalRequest = [
-            httpMethod ?? "GET",
-            url?.canonicalURI ?? "",
-            url?.canonicalQueryString ?? "",
-            canonicalHeaders ?? "",
-            signedHeaders ?? "",
-            encodedPayloadHash
-        ].joined(separator: "\n")
+        let canonicalRequestComponents = [
+            httpMethod ?? "GET", "\n",
+            url?.canonicalURI ?? "", "\n",
+            url?.canonicalQueryString ?? "", "\n",
+            canonicalHeaders ?? "", "\n",
+            signedHeaders ?? "", "\n",
+            encodedPayloadSignature
+        ]
 
-        let stringToSign = [
-            "AWS4-HMAC-SHA256",
-            date,
-            credentialScope,
-            canonicalRequest.sha256Hash.hexEncodedString()
-        ].joined(separator: "\n")
+        let requestSignature = canonicalRequestComponents
+            .reduce(into: SHA256()) { f, parameter in
+                f.update(data: Data(parameter.utf8))
+            }
+            .finalize()
 
-        let signature = hmacDigest(derivedSigningKey, stringToSign.utf8Data).hexEncodedString()
+        let signatureComponents = [
+            "AWS4-HMAC-SHA256", "\n",
+            date, "\n",
+            credentialScope, "\n",
+            requestSignature.hexEncodedString()
+        ]
 
-        let authorization = "AWS4-HMAC-SHA256 Credential=\(credentials.accessKeyID)/\(credentialScope), SignedHeaders=\(signedHeaders ?? ""), Signature=\(signature)"
+        let signature = signatureComponents
+            .reduce(into: HMAC<SHA256>(key: derivedSigningKey)) { f, component in
+                f.update(data: Data(component.utf8))
+            }
+            .finalize()
+
+        let authorization = "AWS4-HMAC-SHA256 Credential=\(credentials.accessKeyID)/\(credentialScope), SignedHeaders=\(signedHeaders ?? ""), Signature=\(signature.hexEncodedString())"
 
         setValue(authorization, forHTTPHeaderField: "Authorization")
-        setValue(encodedPayloadHash, forHTTPHeaderField: "x-amz-content-sha256")
+        setValue(encodedPayloadSignature, forHTTPHeaderField: "x-amz-content-sha256")
     }
 }
 
@@ -97,26 +111,10 @@ private extension URL {
     }
 }
 
-private extension String {
-    var sha256Hash: Data {
-        utf8Data.sha256Hash()
+private extension Sequence where Element == UInt8 {
+    func hexEncodedString() -> String {
+        map { String(format: "%02x", $0) }.joined()
     }
-
-    var utf8Data: Data {
-        data(using: .utf8) ?? Data()
-    }
-}
-
-private func hmacDigest(_ key: Data, _ data: Data) -> Data {
-    var digest = Array(repeating: 0x00 as UInt8, count: Int(CC_SHA256_DIGEST_LENGTH))
-
-    key.withUnsafeBytes { rawKey in
-        data.withUnsafeBytes { bytes in
-            CCHmac(CCHmacAlgorithm(kCCHmacAlgSHA256), rawKey.baseAddress, key.count, bytes.baseAddress, data.count, &digest)
-        }
-    }
-
-    return Data(bytes: &digest, count: Int(CC_SHA256_DIGEST_LENGTH))
 }
 
 private let dateTimeFormatter: DateFormatter = {
